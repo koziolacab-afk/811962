@@ -1,1 +1,65 @@
 
+name: Build ESP32-S3 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Waveshare_6ch_modbus/**"
+      - ".github/workflows/build-firmware.yml"
+      - "firmware_manifest.json"
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.17
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib install "WiFiManager"
+          arduino-cli lib install "Adafruit NeoPixel"
+          arduino-cli lib install "ArduinoJson"
+
+      - name: Compile firmware
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=min_spiffs,FlashSize=4M" \
+            --build-path build \
+            Waveshare_6ch_modbus
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p firmware-artifacts
+          cp build/Waveshare_6ch_modbus.ino.bin firmware-artifacts/firmware.bin
+          cp build/Waveshare_6ch_modbus.ino.bootloader.bin firmware-artifacts/bootloader.bin
+          cp build/Waveshare_6ch_modbus.ino.partitions.bin firmware-artifacts/partitions.bin
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveshare-6ch-firmware
+          path: firmware-artifacts/*
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            firmware-artifacts/firmware.bin
+            firmware-artifacts/bootloader.bin
+            firmware-artifacts/partitions.bin
