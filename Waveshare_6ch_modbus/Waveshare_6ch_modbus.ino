@@ -11,6 +11,7 @@
 #else
 #define ESP_ARDUINO_VERSION_MAJOR 2
 #endif
+#include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
 
 #define TXD1 17
@@ -23,6 +24,7 @@
 #define GPIO_PIN_CH6 46
 #define GPIO_PIN_RGB 38
 #define GPIO_PIN_BUZZER 21
+#define GPIO_PIN_BOOT 0
 
 static constexpr uint16_t MODBUS_PORT = 502;
 static constexpr uint8_t MODBUS_UNIT_ID = 1;
@@ -39,6 +41,9 @@ static constexpr uint16_t BOOT_COUNTER_RESET_COIL = 101;
 static constexpr uint16_t OTA_STATUS_INPUT_REGISTER = 100;
 static constexpr uint16_t DIAG_REGISTER_FIRST = 100;
 static constexpr uint16_t DIAG_REGISTER_LAST = 111;
+static constexpr uint32_t BOOT_PORTAL_HOLD_MS = 5000;
+static constexpr uint32_t BOOT_RESET_WIFI_HOLD_MS = 10000;
+static constexpr uint32_t OTA_VALIDATE_AFTER_MS = 60000;
 
 // GitHub Actions updates this fixed release asset. OTA is triggered manually by Modbus coil 100.
 static constexpr const char *OTA_FIRMWARE_URL =
@@ -69,6 +74,10 @@ uint32_t lastWifiReconnectAttempt = 0;
 uint32_t lastModbusActivity = 0;
 uint32_t lastStatusLedUpdate = 0;
 bool statusBlink = false;
+bool watchdogStarted = false;
+uint32_t bootButtonPressedAt = 0;
+bool bootButtonWasPressed = false;
+bool otaValidationDone = false;
 
 enum OtaStatus : uint16_t {
     OTA_STATUS_IDLE = 0,
@@ -134,7 +143,21 @@ static void setupWatchdog() {
 }
 
 static void startWatchdog() {
+    if (watchdogStarted) {
+        return;
+    }
+
     setupWatchdog();
+    watchdogStarted = true;
+}
+
+static void stopWatchdog() {
+    if (!watchdogStarted) {
+        return;
+    }
+
+    esp_task_wdt_delete(nullptr);
+    watchdogStarted = false;
 }
 
 static void setupDiagnostics() {
@@ -167,6 +190,73 @@ static void handleWifi() {
 
     lastWifiReconnectAttempt = now;
     WiFi.reconnect();
+}
+
+static void runWifiManagerPortal(bool resetSettings) {
+    Serial.println(resetSettings ? "BOOT: reset WiFi settings and start portal" : "BOOT: start WiFiManager portal");
+
+    allRelaysOff();
+    setRgb(resetSettings ? 80 : 0, 0, resetSettings ? 0 : 80);
+
+    if (modbusClient) {
+        modbusClient.stop();
+    }
+
+    stopWatchdog();
+
+    wifiManager.setConfigPortalTimeout(WIFI_MANAGER_PORTAL_TIMEOUT_SEC);
+    wifiManager.setConnectTimeout(WIFI_MANAGER_CONNECT_TIMEOUT_SEC);
+    wifiManager.setBreakAfterConfig(true);
+
+    if (resetSettings) {
+        wifiManager.resetSettings();
+        WiFi.disconnect(true, true);
+        delay(500);
+    }
+
+    const bool connected = wifiManager.startConfigPortal("Podlewanie-ESP32S3");
+
+    if (connected) {
+        Serial.print("WiFiManager portal finished, IP: ");
+        Serial.println(WiFi.localIP());
+        beep(80);
+    } else {
+        Serial.println("WiFiManager portal timeout or no connection");
+    }
+
+    lastWifiReconnectAttempt = 0;
+    startWatchdog();
+}
+
+static void handleBootButton() {
+    const bool pressed = digitalRead(GPIO_PIN_BOOT) == LOW;
+    const uint32_t now = millis();
+
+    if (pressed && !bootButtonWasPressed) {
+        bootButtonWasPressed = true;
+        bootButtonPressedAt = now;
+    }
+
+    if (!pressed && bootButtonWasPressed) {
+        const uint32_t heldMs = now - bootButtonPressedAt;
+        bootButtonWasPressed = false;
+        bootButtonPressedAt = 0;
+
+        if (heldMs >= BOOT_RESET_WIFI_HOLD_MS) {
+            runWifiManagerPortal(true);
+        } else if (heldMs >= BOOT_PORTAL_HOLD_MS) {
+            runWifiManagerPortal(false);
+        }
+    }
+
+    if (pressed && bootButtonPressedAt != 0) {
+        const uint32_t heldMs = now - bootButtonPressedAt;
+        if (heldMs >= BOOT_RESET_WIFI_HOLD_MS) {
+            setRgb(80, 0, 0);
+        } else if (heldMs >= BOOT_PORTAL_HOLD_MS) {
+            setRgb(0, 0, 80);
+        }
+    }
 }
 
 static void updateStatusLed() {
@@ -423,6 +513,38 @@ static void handleOtaRequest() {
 
     otaRequested = false;
     checkForOtaUpdate();
+}
+
+static void validateRunningFirmwareAfterStableBoot() {
+    if (otaValidationDone || millis() < OTA_VALIDATE_AFTER_MS) {
+        return;
+    }
+
+    otaValidationDone = true;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running == nullptr) {
+        Serial.println("OTA rollback: running partition unavailable");
+        return;
+    }
+
+    esp_ota_img_states_t otaState;
+    const esp_err_t stateResult = esp_ota_get_state_partition(running, &otaState);
+    if (stateResult != ESP_OK) {
+        Serial.printf("OTA rollback: state unavailable: %d\n", stateResult);
+        return;
+    }
+
+    if (otaState == ESP_OTA_IMG_PENDING_VERIFY) {
+        const esp_err_t validResult = esp_ota_mark_app_valid_cancel_rollback();
+        if (validResult == ESP_OK) {
+            Serial.println("OTA rollback: firmware marked valid");
+        } else {
+            Serial.printf("OTA rollback: mark valid failed: %d\n", validResult);
+        }
+    } else {
+        Serial.printf("OTA rollback: current state %d, no validation needed\n", static_cast<int>(otaState));
+    }
 }
 
 static void writeU16(uint8_t *buffer, size_t offset, uint16_t value) {
@@ -730,6 +852,7 @@ void setup() {
 
     pinMode(GPIO_PIN_BUZZER, OUTPUT);
     digitalWrite(GPIO_PIN_BUZZER, LOW);
+    pinMode(GPIO_PIN_BOOT, INPUT_PULLUP);
 
     rgb.begin();
     setRgb(80, 40, 0);
@@ -764,9 +887,11 @@ void setup() {
 
 void loop() {
     esp_task_wdt_reset();
+    handleBootButton();
     handleWifi();
     handleModbusServer();
     handleOtaRequest();
+    validateRunningFirmwareAfterStableBoot();
     updateStatusLed();
     delay(2);
 }
