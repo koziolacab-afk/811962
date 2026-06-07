@@ -26,7 +26,7 @@
 
 static constexpr uint16_t MODBUS_PORT = 502;
 static constexpr uint8_t MODBUS_UNIT_ID = 1;
-static constexpr const char *FIRMWARE_VERSION = "1.0.5";
+static constexpr const char *FIRMWARE_VERSION = "1.0.6";
 static constexpr bool RELAY_ACTIVE_HIGH = true;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;
 static constexpr uint32_t MODBUS_CLIENT_TIMEOUT_MS = 15000;
