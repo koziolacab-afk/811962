@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
-#include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <Update.h>
@@ -31,7 +30,7 @@ static constexpr const char *FIRMWARE_VERSION = "1.0.5";
 static constexpr bool RELAY_ACTIVE_HIGH = true;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;
 static constexpr uint32_t MODBUS_CLIENT_TIMEOUT_MS = 15000;
-static constexpr uint32_t STATUS_LED_INTERVAL_MS = 500;
+static constexpr uint32_t STATUS_LED_INTERVAL_MS = 10000;
 static constexpr uint32_t OTA_HTTP_TIMEOUT_MS = 20000;
 static constexpr uint16_t WIFI_MANAGER_CONNECT_TIMEOUT_SEC = 30;
 static constexpr uint16_t WIFI_MANAGER_PORTAL_TIMEOUT_SEC = 300;
@@ -41,11 +40,9 @@ static constexpr uint16_t OTA_STATUS_INPUT_REGISTER = 100;
 static constexpr uint16_t DIAG_REGISTER_FIRST = 100;
 static constexpr uint16_t DIAG_REGISTER_LAST = 111;
 
-// Replace OWNER/REPO/BRANCH with your GitHub repository details.
-// Example:
-// https://raw.githubusercontent.com/koziolek/Podlewanie_custom_device/main/firmware_manifest.json
-static constexpr const char *OTA_MANIFEST_URL =
-    "https://raw.githubusercontent.com/koziolacab-afk/811962/refs/heads/main/firmware_manifest.json";
+// GitHub Actions updates this fixed release asset. OTA is triggered manually by Modbus coil 100.
+static constexpr const char *OTA_FIRMWARE_URL =
+    "https://github.com/koziolacab-afk/811962/releases/download/ota/firmware.bin";
 
 // Simple mode for home devices. For stricter security, pin GitHub's root CA instead of setInsecure().
 static constexpr bool OTA_ALLOW_INSECURE_TLS = true;
@@ -292,62 +289,10 @@ static bool isValidInputRegister(uint16_t address) {
     return address >= DIAG_REGISTER_FIRST && address <= DIAG_REGISTER_LAST;
 }
 
-static bool isNewerVersion(const String &remoteVersion) {
-    int current[3] = {0, 0, 0};
-    int remote[3] = {0, 0, 0};
-
-    if (!parseVersion(FIRMWARE_VERSION, current) || !parseVersion(remoteVersion, remote)) {
-        return remoteVersion != FIRMWARE_VERSION;
-    }
-
-    for (int i = 0; i < 3; i++) {
-        if (remote[i] > current[i]) {
-            return true;
-        }
-        if (remote[i] < current[i]) {
-            return false;
-        }
-    }
-
-    return false;
-}
-
 static void configureHttpsClient(WiFiClientSecure &client) {
     if (OTA_ALLOW_INSECURE_TLS) {
         client.setInsecure();
     }
-}
-
-static bool httpGetJson(const char *url, DynamicJsonDocument &doc) {
-    WiFiClientSecure secureClient;
-    configureHttpsClient(secureClient);
-
-    HTTPClient http;
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setTimeout(OTA_HTTP_TIMEOUT_MS);
-
-    if (!http.begin(secureClient, url)) {
-        Serial.println("OTA: failed to begin manifest request");
-        return false;
-    }
-
-    const int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-        Serial.printf("OTA: manifest HTTP status %d\n", code);
-        http.end();
-        return false;
-    }
-
-    const DeserializationError error = deserializeJson(doc, http.getStream());
-    http.end();
-
-    if (error) {
-        Serial.print("OTA: manifest JSON error: ");
-        Serial.println(error.c_str());
-        return false;
-    }
-
-    return true;
 }
 
 static bool performFirmwareUpdate(const char *firmwareUrl, const char *md5) {
@@ -453,43 +398,13 @@ static void checkForOtaUpdate() {
         return;
     }
 
-    if (isPlaceholderUrl(OTA_MANIFEST_URL)) {
-        Serial.println("OTA: manifest URL still contains OWNER/REPO/BRANCH placeholder");
-        otaStatus = OTA_STATUS_ERROR;
-        return;
-    }
-
     otaStatus = OTA_STATUS_CHECKING;
-    Serial.println("OTA: checking GitHub manifest");
-
-    DynamicJsonDocument doc(1024);
-    if (!httpGetJson(OTA_MANIFEST_URL, doc)) {
-        otaStatus = OTA_STATUS_ERROR;
-        return;
-    }
-
-    const char *version = doc["version"] | "";
-    const char *url = doc["url"] | "";
-    const char *md5 = doc["md5"] | "";
-
-    if (strlen(version) == 0 || strlen(url) == 0) {
-        Serial.println("OTA: manifest missing version or url");
-        otaStatus = OTA_STATUS_ERROR;
-        return;
-    }
-
-    Serial.printf("OTA: current=%s remote=%s\n", FIRMWARE_VERSION, version);
-    if (!isNewerVersion(version)) {
-        Serial.println("OTA: firmware is up to date");
-        otaStatus = OTA_STATUS_NO_UPDATE;
-        return;
-    }
-
-    Serial.println("OTA: new firmware available, updating");
+    Serial.print("OTA: downloading fixed GitHub release asset: ");
+    Serial.println(OTA_FIRMWARE_URL);
     otaStatus = OTA_STATUS_DOWNLOADING;
     allRelaysOff();
 
-    if (performFirmwareUpdate(url, md5)) {
+    if (performFirmwareUpdate(OTA_FIRMWARE_URL, "")) {
         Serial.println("OTA: update successful, restarting");
         otaStatus = OTA_STATUS_UPDATED_REBOOTING;
         beep(120);
