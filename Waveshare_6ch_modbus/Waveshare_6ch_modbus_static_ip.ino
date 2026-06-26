@@ -56,7 +56,7 @@ static constexpr const char *WIFI_PASSWORD = "YOUR_PASSWORD";
 
 // GitHub Actions updates this fixed release asset. OTA is triggered manually by Modbus coil 100.
 static constexpr const char *OTA_FIRMWARE_URL =
-    "https://github.com/koziolacab-afk/811962/releases/download/ota/firmware.bin";
+    "https://github.com/koziolacab-afk/811962/blob/main/firmware_manifest.json";
 
 // Simple mode for home devices. For stricter security, pin GitHub's root CA instead of setInsecure().
 static constexpr bool OTA_ALLOW_INSECURE_TLS = true;
